@@ -1,0 +1,43 @@
+{
+  "displayName": "HomebridgeGenericLight",
+  "name": "homebridge-generic-light",
+  "version": "0.0.1-beta.0",
+  "description": "Control LED devices",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.comthebenck/homebridge-generic-light"
+  },
+  "bugs": {
+    "url": "https://github.comthebenck/homebridge-generic-light/issues"
+  },
+  "engines": {
+    "node": ">=10.17.0",
+    "homebridge": ">0.4.53"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "lint": "eslint src/**.ts",
+    "watch": "npm run build && npm link && nodemon",
+    "build": "rimraf ./dist && tsc",
+    "prepublishOnly": "npm run lint && npm run build"
+  },
+  "keywords": [
+    "homebridge-plugin"
+  ],
+  "dependencies": {
+    "color-convert": "^2.0.1",
+    "magic-home": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^14.0.14",
+    "@typescript-eslint/eslint-plugin": "^3.4.0",
+    "@typescript-eslint/parser": "^3.4.0",
+    "eslint": "^7.3.1",
+    "homebridge": "^1.1.1",
+    "nodemon": "^2.0.4",
+    "rimraf": "^3.0.2",
+    "ts-node": "^8.10.2",
+    "typescript": "^3.9.5"
+  }
+}
