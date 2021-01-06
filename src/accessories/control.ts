@@ -3,8 +3,7 @@ const net = require('net');
 
 const mergeOptions = require('merge-options');
 
-const EffectInterface = require('./EffectInterface');
-const CustomMode = require('./CustomMode');
+import { CustomMode, EffectInterface } from 'magic-home';
 
 const PORT = 6668;
 // some controllers send their responses in multiple chunks, and we only know that we got the full message, if the controller doesn't send something for a while
