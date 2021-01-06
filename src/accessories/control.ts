@@ -1,3 +1,4 @@
+// @ts-nocheck
 const net = require('net');
 
 const mergeOptions = require('merge-options');
@@ -98,7 +99,7 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-class Control {
+export class Control {
   /**
    * Create a new Control instance. This does not connect to the controller, yet.
    * @param {String} address IP or hostname of the controller
@@ -808,5 +809,3 @@ class Control {
     return promise;
   }
 }
-
-module.exports = Control;
