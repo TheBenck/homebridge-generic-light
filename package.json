@@ -6,10 +6,10 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.comthebenck/homebridge-generic-light"
+    "url": "https://github.com/thebenck/homebridge-generic-light"
   },
   "bugs": {
-    "url": "https://github.comthebenck/homebridge-generic-light/issues"
+    "url": "https://github.com/thebenck/homebridge-generic-light/issues"
   },
   "engines": {
     "node": ">=10.17.0",
