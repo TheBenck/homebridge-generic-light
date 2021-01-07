@@ -16,6 +16,7 @@ import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
  * - platform: string;
  * - name: string;
  * - debug?: boolean;
+ * - discover: boolean;
  * - devices: Config Device Type [];
  */
 
@@ -54,15 +55,15 @@ export default class GenericLightPlatform implements DynamicPlatformPlugin {
   }
 
   discoverDevices() {
-    if (this.config.discover === false) {
-      this.log.info('Using config.json for device list');
-      this.setupDevices(this.config.devices);
-    } else {
+    if (this.config.discover) {
       this.log.info('Scanning for devices...');
       const discovery = new Discovery();
       discovery.scan(500).then((devices) => {
         this.setupDevices(devices);
       });
+    } else {
+      this.log.info('Using config.json for device list');
+      this.setupDevices(this.config.devices);
     }
   }
 

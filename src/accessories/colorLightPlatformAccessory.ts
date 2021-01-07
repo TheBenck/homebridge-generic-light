@@ -25,7 +25,7 @@ export type ColorLightPlatformAccessoryStateType = {
 export default class ColorLightPlatformAccessory {
   private light: Control;
   private service: Service;
-  private state: ColorLightPlatformAccessoryStateType = {
+  private states: ColorLightPlatformAccessoryStateType = {
     On: false,
     Hue: 0,
     Brightness: 100,

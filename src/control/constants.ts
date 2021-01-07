@@ -23,7 +23,5 @@ export const patterns = Object.freeze({
 
 export const patternNames = Object.keys(patterns);
 
-export const PORT = 6668;
-
 // some controllers send their responses in multiple chunks, and we only know that we got the full message, if the controller doesn't send something for a while
 export const RESPONSE_TIMEOUT = 500; // 0.5 sec
