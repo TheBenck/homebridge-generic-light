@@ -1,164 +1,76 @@
-// @ts-nocheck
-const net = require('net');
-
-const mergeOptions = require('merge-options');
-
+import net from 'net';
 import { CustomMode, EffectInterface } from 'magic-home';
+import { patterns, RESPONSE_TIMEOUT } from './constants';
+import {
+  clamp,
+  delayToSpeed,
+  determineMode,
+  determinePattern,
+  speedToDelay,
+} from './helpers';
+import {
+  ControlOptionsInputType,
+  ControlOptionsType,
+  RgbColorType,
+  StateType,
+} from './types';
 
-const PORT = 6668;
-// some controllers send their responses in multiple chunks, and we only know that we got the full message, if the controller doesn't send something for a while
-const RESPONSE_TIMEOUT = 500; // 0.5 sec
+export default class Control {
+  private ipAddress: string;
+  private port: number;
 
-const patterns = Object.freeze({
-  seven_color_cross_fade: 0x25,
-  red_gradual_change: 0x26,
-  green_gradual_change: 0x27,
-  blue_gradual_change: 0x28,
-  yellow_gradual_change: 0x29,
-  cyan_gradual_change: 0x2a,
-  purple_gradual_change: 0x2b,
-  white_gradual_change: 0x2c,
-  red_green_cross_fade: 0x2d,
-  red_blue_cross_fade: 0x2e,
-  green_blue_cross_fade: 0x2f,
-  seven_color_strobe_flash: 0x30,
-  red_strobe_flash: 0x31,
-  green_strobe_flash: 0x32,
-  blue_stobe_flash: 0x33,
-  yellow_strobe_flash: 0x34,
-  cyan_strobe_flash: 0x35,
-  purple_strobe_flash: 0x36,
-  white_strobe_flash: 0x37,
-  seven_color_jumping: 0x38,
-});
+  private options: ControlOptionsType;
 
-/**
- * @typedef {Object} QueryResponse
- * @property {number} type
- * @property {boolean} on
- * @property {string} mode
- * @property {number} speed
- * @property {object} color
- * @property {number} color.red
- * @property {number} color.green
- * @property {number} color.blue
- * @property {number} warm_white
- * @property {number} cold_white
- */
+  private commandQueue: any;
+  private socket: any;
 
-/*
- * Helper functions
- */
-function determineMode(resp) {
-  if (
-    resp.readUInt8(3) === 0x61 ||
-    (resp.readUInt8(3) === 0 && resp.readUInt8(4) === 0x61)
-  ) {
-    return 'color';
-  } else if (resp.readUInt8(3) === 0x62) {
-    return 'special';
-  } else if (resp.readUInt8(3) === 0x60) {
-    return 'custom';
-  } else if (resp.readUInt8(3) >= 0x25 && resp.readUInt8(3) <= 0x38) {
-    // we can ignore bit 4 here, since it is always 0x21 and resp.readUInt16BE(3) is >= 9505
-    return 'pattern';
-  } else if (resp.readUInt16BE(3) >= 0x64 && resp.readUInt16BE(3) <= 0x018f) {
-    return 'ia_pattern';
-  } else {
-    return null;
-  }
-}
+  private receivedData: Buffer;
+  private receiveTimeout?: ReturnType<typeof setTimeout>;
+  private connectTimeout?: ReturnType<typeof setTimeout>;
+  private commandTimeout?: ReturnType<typeof setTimeout>;
+  private preventDataSending: boolean;
 
-function determinePattern(resp) {
-  if (resp.readUInt8(3) >= 0x25 && resp.readUInt8(3) <= 0x38) {
-    for (let pattern_name in patterns) {
-      if (patterns[pattern_name] === resp.readUInt8(3)) return pattern_name;
-    }
-  }
+  private lastColor: RgbColorType;
+  private lastWW: number;
+  private lastCW: number;
 
-  if (resp.readUInt16BE(3) >= 0x64 && resp.readUInt16BE(3) <= 0x018f) {
-    return resp.readUInt16BE(3) - 99;
-  }
-
-  return null;
-}
-
-function delayToSpeed(delay) {
-  delay = clamp(delay, 1, 31);
-  delay -= 1; // bring into interval [0, 30]
-  return 100 - (delay / 30) * 100;
-}
-
-function speedToDelay(speed) {
-  speed = clamp(speed, 0, 100);
-  return 30 - (speed / 100) * 30 + 1;
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-export class Control {
   /**
    * Create a new Control instance. This does not connect to the controller, yet.
-   * @param {String} address IP or hostname of the controller
-   * @param {Object} options
-   * @param {boolean} options.wait_for_reply [Deprecated] Wait for the controllers to send data as acknowledgement. (Default: true)
-   * @param {boolean} options.log_all_received Print all received bytes into stdout for debug purposes (Default: false)
-   * @param {boolean} options.apply_masks Set the mask bit in setColor and setWarmWhite (Default: false)
-   * @param {boolean} options.cold_white_support Send a different version of the color change packets, which also set the cold white values (Default: false)
-   * @param {Number} options.connect_timeout Duration in milliseconds after which the connection attempt will be cancelled if the connection can not be established (Default: null [No timeout])
-   * @param {Number} options.command_timeout Duration in milliseconds after which an acknowledged command will be regarded as failed. Set to null to disable. (Default: 1000)
-   * @param {Object} options.ack
-   * @param {boolean} options.ack.power Wait for controller to send data to achnowledge power change commands (Default: true)
-   * @param {boolean} options.ack.color Wait for controller to send data to achnowledge color change commands (Default: true)
-   * @param {boolean} options.ack.pattern Wait for controller to send data to achnowledge built-in pattern change commands (Default: true)
-   * @param {boolean} options.ack.custom_pattern Wait for controller to send data to achnowledge custom pattern change commands (Default: true)
    */
-  constructor(address, options = {}) {
-    this._address = address;
+  constructor(ipAddress, port, options?: ControlOptionsInputType) {
+    this.ipAddress = ipAddress;
+    this.port = port;
 
-    if ('wait_for_reply' in options) {
-      options.ack = options.wait_for_reply
-        ? Control.ackMask(0x0f)
-        : Control.ackMask(0);
-    }
-
-    this._options = mergeOptions(
-      {
-        log_all_received: false,
-        apply_masks: false,
-        ack: {
-          power: true,
-          color: true,
-          pattern: true,
-          custom_pattern: true,
-        },
-        connect_timeout: null,
-        command_timeout: 1000,
-        cold_white_support: false,
+    this.options = {
+      logAllReceived: false,
+      applyMasks: false,
+      commandTimeoutLength: 1000,
+      connectTimeoutLength: undefined,
+      coldWhiteSupport: false,
+      ...options,
+      ack: {
+        power: true,
+        color: true,
+        pattern: true,
+        customPattern: true,
+        ...options?.ack,
       },
-      options
-    );
+    };
 
-    this._commandQueue = [];
+    this.commandQueue = [];
 
-    this._socket = null;
+    this.socket = null;
 
-    this._receivedData = Buffer.alloc(0);
-    this._receiveTimeout = null;
-    this._connectTimeout = null;
-    this._commandTimeout = null;
-    this._preventDataSending = false;
+    this.receivedData = Buffer.alloc(0);
+    this.receiveTimeout = undefined;
+    this.connectTimeout = undefined;
+    this.commandTimeout = undefined;
+    this.preventDataSending = false;
 
     // store the values of the last sent/received values to enable the convenience methods
-    this._lastColor = { red: 0, green: 0, blue: 0 };
-    this._lastWW = 0;
-    this._lastCW = 0;
-  }
-
-  static get patternNames() {
-    return Object.keys(patterns);
+    this.lastColor = { red: 0, green: 0, blue: 0 };
+    this.lastWW = 0;
+    this.lastCW = 0;
   }
 
   static ackMask(mask) {
@@ -166,52 +78,58 @@ export class Control {
       power: (mask & 0x01) > 0,
       color: (mask & 0x02) > 0,
       pattern: (mask & 0x04) > 0,
-      custom_pattern: (mask & 0x08) > 0,
+      customPattern: (mask & 0x08) > 0,
     };
   }
 
-  _receiveData(empty, data) {
-    if (this._commandTimeout !== null) {
+  /**
+   * @private
+   */
+  receiveData(empty: boolean, data?: any) {
+    if (this.commandTimeout) {
       // we have received _something_ so the command cannot timeout anymore
-      clearTimeout(this._commandTimeout);
-      this._commandTimeout = null;
+      clearTimeout(this.commandTimeout);
+      this.commandTimeout = undefined;
     }
 
     if (empty) {
       // no data, so request is instantly finished
       // this can happend when a command is sent without waiting for a reply or when a timeout is reached
-      let finished_command = this._commandQueue[0];
+      let finished_command = this.commandQueue[0];
 
       if (finished_command != undefined) {
         const resolve = finished_command.resolve;
         if (resolve != undefined) {
-          resolve(this._receivedData);
+          resolve(this.receivedData);
         }
       }
 
       // clear received data
-      this._receivedData = Buffer.alloc(0);
+      this.receivedData = Buffer.alloc(0);
 
-      this._commandQueue.shift();
+      this.commandQueue.shift();
 
-      this._handleNextCommand();
+      this.handleNextCommand();
     } else {
-      this._receivedData = Buffer.concat([this._receivedData, data]);
+      this.receivedData = Buffer.concat([this.receivedData, data]);
 
-      if (this._receiveTimeout != null) clearTimeout(this._receiveTimeout);
+      if (this.receiveTimeout != null) clearTimeout(this.receiveTimeout);
 
       // since we don't know how long the response is going to be, set a timeout after which we consider the
       // whole message to be received
-      this._receiveTimeout = setTimeout(() => {
-        this._receiveData(true);
+      this.receiveTimeout = setTimeout(() => {
+        this.receiveData(true);
       }, RESPONSE_TIMEOUT);
     }
   }
 
-  _handleCommandTimeout() {
-    this._commandTimeout = null;
+  /**
+   * @private
+   */
+  handleCommandTimeout() {
+    this.commandTimeout = undefined;
 
-    let timedout_command = this._commandQueue[0];
+    let timedout_command = this.commandQueue[0];
 
     if (timedout_command !== undefined) {
       const reject = timedout_command.reject;
@@ -220,37 +138,45 @@ export class Control {
       }
     }
 
-    this._receivedData = Buffer.alloc(0); // just for good measure
+    this.receivedData = Buffer.alloc(0); // just for good measure
 
-    this._commandQueue.shift();
+    this.commandQueue.shift();
 
-    this._handleNextCommand();
+    this.handleNextCommand();
   }
 
-  _handleNextCommand() {
-    if (this._commandQueue.length == 0) {
-      if (this._socket != null) this._socket.end();
-      this._socket = null;
+  /**
+   * @private
+   */
+  handleNextCommand() {
+    if (this.commandQueue.length == 0) {
+      if (this.socket != null) this.socket.end();
+      this.socket = null;
     } else {
-      let cmd = this._commandQueue[0];
+      let cmd = this.commandQueue[0];
 
-      if (!cmd.expect_reply) {
-        this._socket.write(cmd.command, 'binary', () => {
-          this._receiveData(true);
+      if (!cmd.expectReply) {
+        this.socket.write(cmd.command, 'binary', () => {
+          this.receiveData(true);
         });
       } else {
-        this._socket.write(cmd.command, 'binary', () => {
-          if (this._options.command_timeout === null) return;
+        this.socket.write(cmd.command, 'binary', () => {
+          if (this.options.commandTimeoutLength === undefined) {
+            return;
+          }
 
-          this._commandTimeout = setTimeout(() => {
-            this._handleCommandTimeout();
-          }, this._options.command_timeout);
+          this.commandTimeout = setTimeout(() => {
+            this.handleCommandTimeout();
+          }, this.options.commandTimeoutLength);
         });
       }
     }
   }
 
-  _sendCommand(buf, expect_reply, resolve, reject) {
+  /**
+   * @private
+   */
+  sendCommand(buf: Buffer, expectReply, resolve, reject) {
     // calculate checksum
     let checksum = 0;
     for (let byte of buf.values()) {
@@ -261,78 +187,84 @@ export class Control {
     // append checksum to command buffer
     let command = Buffer.concat([buf, Buffer.from([checksum])]);
 
-    if (this._commandQueue.length == 0 && this._socket == null) {
-      this._commandQueue.push({ expect_reply, resolve, reject, command });
+    if (this.commandQueue.length == 0 && this.socket == null) {
+      this.commandQueue.push({ expectReply, resolve, reject, command });
 
-      this._preventDataSending = false;
+      this.preventDataSending = false;
 
-      this._socket = net.connect(PORT, this._address, () => {
-        if (this._connectTimeout != null) {
-          clearTimeout(this._connectTimeout);
-          this._connectTimeout = null;
+      this.socket = net.connect(this.port, this.ipAddress, () => {
+        if (this.connectTimeout != null) {
+          clearTimeout(this.connectTimeout);
+          this.connectTimeout = undefined;
         }
 
-        if (!this._preventDataSending) {
+        if (!this.preventDataSending) {
           // prevent "write after end" errors
-          this._handleNextCommand(); // which is the "first" command in this case
+          this.handleNextCommand(); // which is the "first" command in this case
         }
       });
 
-      this._socket.on('error', (err) => {
-        this._socketErrorHandler(err, reject);
+      this.socket.on('error', (err) => {
+        this.socketErrorHandler(err, reject);
       });
 
-      this._socket.on('data', (data) => {
-        if (this._options.log_all_received) {
+      this.socket.on('data', (data) => {
+        if (this.options.logAllReceived) {
           console.log(
             'Received:',
             data.toString('hex').replace(/(\w{2})/g, '$1 ')
           );
         }
 
-        this._receiveData(false, data);
+        this.receiveData(false, data);
       });
 
-      if (this._options.connect_timeout != null) {
-        this._connectTimeout = setTimeout(() => {
-          this._socketErrorHandler(
+      if (this.options.connectTimeoutLength) {
+        this.connectTimeout = setTimeout(() => {
+          this.socketErrorHandler(
             new Error('Connection timeout reached'),
             reject
           );
-        }, this._options.connect_timeout);
+        }, this.options.connectTimeoutLength);
       }
     } else {
-      this._commandQueue.push({ expect_reply, resolve, reject, command });
+      this.commandQueue.push({ expectReply, resolve, reject, command });
     }
   }
 
-  _socketErrorHandler(err, reject) {
-    this._preventDataSending = true;
+  /**
+   * @private
+   */
+  socketErrorHandler(err, reject) {
+    this.preventDataSending = true;
 
     reject(err);
 
-    if (this._socket != null) this._socket.end();
-    this._socket = null;
+    if (this.socket != null) this.socket.end();
+    this.socket = null;
 
     // also reject all commands currently in the queue
-    for (let c of this._commandQueue) {
+    for (let c of this.commandQueue) {
       let reject = c.reject;
       if (reject != undefined) {
         reject(err);
       }
     }
 
-    this._commandQueue = []; // reset commandqueue so commands dont get stuck if the controller becomes unavailable
+    this.commandQueue = []; // reset commandqueue so commands dont get stuck if the controller becomes unavailable
   }
 
-  _sendColorChangeCommand(red, green, blue, ww, cw, mask, callback) {
+  /**
+   * @private
+   */
+  sendColorChangeCommand(red, green, blue, ww, cw, mask, callback) {
     red = clamp(red, 0, 255);
     green = clamp(green, 0, 255);
     blue = clamp(blue, 0, 255);
     ww = clamp(ww, 0, 255);
 
     let cmd_buf;
-    if (this._options.cold_white_support) {
+    if (this.options.coldWhiteSupport) {
       cw = clamp(cw, 0, 255);
       cmd_buf = Buffer.from([0x31, red, green, blue, ww, cw, mask, 0x0f]);
     } else {
@@ -340,16 +272,16 @@ export class Control {
     }
 
     const promise = new Promise((resolve, reject) => {
-      this._sendCommand(cmd_buf, this._options.ack.color, resolve, reject);
+      this.sendCommand(cmd_buf, this.options.ack.color, resolve, reject);
     })
-      .then((data) => {
-        return data.length > 0 || !this._options.ack.color;
+      .then((data: any) => {
+        return data.length > 0 || !this.options.ack.color;
       })
       .then((result) => {
         if (result) {
-          this._lastColor = { red, green, blue };
-          this._lastWW = ww;
-          this._lastCW = cw;
+          this.lastColor = { red, green, blue };
+          this.lastWW = ww;
+          this.lastCW = cw;
         }
         return result;
       });
@@ -371,9 +303,9 @@ export class Control {
     let cmd_buf = Buffer.from([0x71, on ? 0x23 : 0x24, 0x0f]);
 
     const promise = new Promise((resolve, reject) => {
-      this._sendCommand(cmd_buf, this._options.ack.power, resolve, reject);
-    }).then((data) => {
-      return data.length > 0 || !this._options.ack.power; // the responses vary from controller to controller and I don't know what they mean
+      this.sendCommand(cmd_buf, this.options.ack.power, resolve, reject);
+    }).then((data: any) => {
+      return data.length > 0 || !this.options.ack.power; // the responses vary from controller to controller and I don't know what they mean
     });
 
     if (callback && typeof callback == 'function') {
@@ -412,18 +344,18 @@ export class Control {
    * @returns {Promise<boolean>}
    */
   setColorAndWarmWhite(red, green, blue, ww, callback) {
-    if (this._options.apply_masks) {
+    if (this.options.applyMasks) {
       console.warn(
         'WARNING: Masks are enabled, but a method which does not use them was called.'
       );
     }
 
-    return this._sendColorChangeCommand(
+    return this.sendColorChangeCommand(
       red,
       green,
       blue,
       ww,
-      this._lastCW,
+      this.lastCW,
       0,
       callback
     );
@@ -441,18 +373,18 @@ export class Control {
    * @returns {Promise<boolean>}
    */
   setColorAndWhites(red, green, blue, ww, cw, callback) {
-    if (this._options.apply_masks) {
+    if (this.options.applyMasks) {
       console.warn(
         'WARNING: Masks are enabled, but a method which does not use them was called.'
       );
     }
 
-    return this._sendColorChangeCommand(red, green, blue, ww, cw, 0, callback);
+    return this.sendColorChangeCommand(red, green, blue, ww, cw, 0, callback);
   }
 
   /**
    * Sets the color values of the controller.
-   * Depending on apply_masks, only the color values, or color values as well as previous warm white values will be sent
+   * Depending on applyMasks, only the color values, or color values as well as previous warm white values will be sent
    * @param {Number} red
    * @param {Number} green
    * @param {Number} blue
@@ -460,8 +392,8 @@ export class Control {
    * @returns {Promise<boolean>}
    */
   setColor(red, green, blue, callback) {
-    if (this._options.apply_masks) {
-      return this._sendColorChangeCommand(
+    if (this.options.applyMasks) {
+      return this.sendColorChangeCommand(
         red,
         green,
         blue,
@@ -475,8 +407,8 @@ export class Control {
         red,
         green,
         blue,
-        this._lastWW,
-        this._lastCW,
+        this.lastWW,
+        this.lastCW,
         callback
       );
     }
@@ -484,27 +416,27 @@ export class Control {
 
   /**
    * Sets the warm white values of the controller.
-   * Depending on apply_masks, only the warm white values, or warm white values as well as previous color values will be sent
+   * Depending on applyMasks, only the warm white values, or warm white values as well as previous color values will be sent
    * @param {Number} ww
    * @param {function} callback called with (err, success)
    * @returns {Promise<boolean>}
    */
   setWarmWhite(ww, callback) {
-    if (this._options.apply_masks) {
-      return this._sendColorChangeCommand(
+    if (this.options.applyMasks) {
+      return this.sendColorChangeCommand(
         0,
         0,
         0,
         ww,
-        this._lastCW,
+        this.lastCW,
         0x0f,
         callback
       );
     } else {
       return this.setColorAndWarmWhite(
-        this._lastColor.red,
-        this._lastColor.green,
-        this._lastColor.blue,
+        this.lastColor.red,
+        this.lastColor.green,
+        this.lastColor.blue,
         ww,
         callback
       );
@@ -513,26 +445,26 @@ export class Control {
 
   /**
    * Sets the white values of the controller.
-   * Depending on apply_masks, only the cold white values, or cold white values as well as previous color values will be sent
+   * Depending on applyMasks, only the cold white values, or cold white values as well as previous color values will be sent
    * @param {Number} ww warm white
    * @param {Number} cw cold white
    * @param {function} callback called with (err, success)
    * @returns {Promise<boolean>}
    */
   setWhites(ww, cw, callback) {
-    if (cw != 0 && !this._options.cold_white_support) {
+    if (cw != 0 && !this.options.coldWhiteSupport) {
       console.warn(
         'WARNING: Cold white support is not enabled, but the cold white value was set to a non-zero value.'
       );
     }
 
-    if (this._options.apply_masks) {
-      return this._sendColorChangeCommand(0, 0, 0, ww, cw, 0x0f, callback);
+    if (this.options.applyMasks) {
+      return this.sendColorChangeCommand(0, 0, 0, ww, cw, 0x0f, callback);
     } else {
       return this.setColorAndWhites(
-        this._lastColor.red,
-        this._lastColor.green,
-        this._lastColor.blue,
+        this.lastColor.red,
+        this.lastColor.green,
+        this.lastColor.blue,
         ww,
         cw,
         callback
@@ -574,8 +506,8 @@ export class Control {
    * @returns {Promise<boolean>}
    */
   setPattern(pattern, speed, callback) {
-    const pattern_code = patterns[pattern];
-    if (pattern_code == undefined) {
+    const patternCode = patterns[pattern];
+    if (patternCode == undefined) {
       const promise = Promise.reject(new Error('Invalid pattern'));
 
       if (callback && typeof callback == 'function') {
@@ -587,12 +519,12 @@ export class Control {
 
     const delay = speedToDelay(speed);
 
-    const cmd_buf = Buffer.from([0x61, pattern_code, delay, 0x0f]);
+    const cmdBuf = Buffer.from([0x61, patternCode, delay, 0x0f]);
 
     const promise = new Promise((resolve, reject) => {
-      this._sendCommand(cmd_buf, this._options.ack.pattern, resolve, reject);
-    }).then((data) => {
-      return data.length > 0 || !this._options.ack.pattern;
+      this.sendCommand(cmdBuf, this.options.ack.pattern, resolve, reject);
+    }).then((data: any) => {
+      return data.length > 0 || !this.options.ack.pattern;
     });
 
     if (callback && typeof callback == 'function') {
@@ -628,12 +560,12 @@ export class Control {
     bufferArray.push(speed);
     bufferArray.push(0x0f);
 
-    const cmd_buf = Buffer.from(bufferArray);
+    const cmdBuf = Buffer.from(bufferArray);
 
     const promise = new Promise((resolve, reject) => {
-      this._sendCommand(cmd_buf, this._options.ack.pattern, resolve, reject);
-    }).then((data) => {
-      return data.length > 0 || !this._options.ack.pattern;
+      this.sendCommand(cmdBuf, this.options.ack.pattern, resolve, reject);
+    }).then((data: any) => {
+      return data.length > 0 || !this.options.ack.pattern;
     });
 
     if (callback && typeof callback == 'function') {
@@ -664,48 +596,48 @@ export class Control {
     let delay = speedToDelay(speed);
 
     // construct command buffer
-    let cmd_buf_values = [0x51];
+    let cmdBufValues = [0x51];
 
     for (let i = 0; i < 16; i++) {
       if (pattern.colors[i]) {
-        cmd_buf_values.push(
+        cmdBufValues.push(
           pattern.colors[i].red,
           pattern.colors[i].green,
           pattern.colors[i].blue,
           0
         );
       } else {
-        cmd_buf_values.push(1, 2, 3, 0);
+        cmdBufValues.push(1, 2, 3, 0);
       }
     }
 
-    cmd_buf_values.push(delay);
+    cmdBufValues.push(delay);
 
     switch (pattern.transitionType) {
       case 'fade':
-        cmd_buf_values.push(0x3a);
+        cmdBufValues.push(0x3a);
         break;
       case 'jump':
-        cmd_buf_values.push(0x3b);
+        cmdBufValues.push(0x3b);
         break;
       case 'strobe':
-        cmd_buf_values.push(0x3c);
+        cmdBufValues.push(0x3c);
         break;
     }
 
-    cmd_buf_values.push(0xff, 0x0f);
+    cmdBufValues.push(0xff, 0x0f);
 
-    const cmd_buf = Buffer.from(cmd_buf_values);
+    const cmd_buf = Buffer.from(cmdBufValues);
 
     const promise = new Promise((resolve, reject) => {
-      this._sendCommand(
+      this.sendCommand(
         cmd_buf,
-        this._options.ack.custom_pattern,
+        this.options.ack.customPattern,
         resolve,
         reject
       );
-    }).then((data) => {
-      return data.length > 0 || !this._options.ack.custom_pattern;
+    }).then((data: any) => {
+      return data.length > 0 || !this.options.ack.customPattern;
     });
 
     if (callback && typeof callback == 'function') {
@@ -723,9 +655,9 @@ export class Control {
   startEffectMode(callback) {
     const promise = new Promise((resolve, reject) => {
       new EffectInterface(
-        this._address,
-        PORT,
-        this._options,
+        this.ipAddress,
+        this.port,
+        this.options,
         (err, effect_interface) => {
           if (err) return reject(err);
 
@@ -744,7 +676,7 @@ export class Control {
   /**
    * Queries the controller for it's current state
    * This method stores the color and ww values for future calls to setColor, setWarmWhite, etc.
-   * It will also set apply_masks to true for controllers which require it.
+   * It will also set applyMasks to true for controllers which require it.
    * @param {function} callback
    * @returns {Promise<QueryResponse>}
    */
@@ -752,13 +684,13 @@ export class Control {
     let cmd_buf = Buffer.from([0x81, 0x8a, 0x8b]);
 
     const promise = new Promise((resolve, reject) => {
-      this._sendCommand(cmd_buf, true, resolve, reject);
-    }).then((data) => {
+      this.sendCommand(cmd_buf, true, resolve, reject);
+    }).then((data: any) => {
       if (data.length < 14) throw new Error('Only got short reply');
 
       const mode = determineMode(data);
 
-      let state = {
+      let state: StateType = {
         type: data.readUInt8(1),
         on: data.readUInt8(2) == 0x23,
         mode: mode,
@@ -776,24 +708,24 @@ export class Control {
         cold_white: data.readUInt8(11),
       };
 
-      this._lastColor = {
+      this.lastColor = {
         red: state.color.red,
         green: state.color.green,
         blue: state.color.blue,
       };
-      this._lastWW = state.warm_white;
-      this._lastCW = state.cold_white;
+      this.lastWW = state.warm_white;
+      this.lastCW = state.cold_white;
 
       switch (state.type) {
         case 0x25:
-          this._options.apply_masks = true;
+          this.options.applyMasks = true;
           break;
         case 0x35:
-          this._options.apply_masks = true;
-          this._options.cold_white_support = true;
+          this.options.applyMasks = true;
+          this.options.coldWhiteSupport = true;
           break;
         case 0x44:
-          this._options.apply_masks = true;
+          this.options.applyMasks = true;
           break;
         // otherwise do not change any options
       }
